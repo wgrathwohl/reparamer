@@ -6,50 +6,13 @@ def gs(x):
     return x.get_shape().as_list()
 
 
-def sanity_test():
-    size = (50000,)
-    shape_parameter = .1
-    scale_parameter = 0.5
-    bins = np.linspace(-1, 5, 30)
-
-    np_res = np.random.gamma(shape=shape_parameter, scale=scale_parameter, size=size)
-
-    # Note the 1/scale_parameter here
-
-    tf_op = tf.random_gamma(shape=size, alpha=shape_parameter, beta=1 / scale_parameter)
-    with tf.Session() as sess:
-        tf_res = sess.run(tf_op)
-
-    plt.hist(tf_res, bins=bins, alpha=0.5)
-    plt.hist(np_res, bins=bins, alpha=0.5)
-    plt.show()
-
-
-def reparam_gamma(a, b):
-    """
-
-    :param a: shape
-    :param b: inverse scale
-    :return: differentiable reparameterization of gamma(a, b)
-    """
-    assert gs(a) == gs(b), "shape must be same"
-    z = tf.random_gamma(tf.shape(a), a, b)
-    digamma_a = tf.digamma(a)
-    logb = tf.log(b)
-    sqrt_digamma_1_a = tf.sqrt(tf.polygamma(1.0, a))
-    num = tf.log(z) - digamma_a + logb
-    den = sqrt_digamma_1_a
-    eps = tf.stop_gradient(num / den)
-    return eps
-    logz = (eps * sqrt_digamma_1_a) - logb + digamma_a
-    z_reparam = tf.exp(logz)
-    return z_reparam
-
+def log(x, eps=1e-8):
+    return tf.log(x + eps)
 
 # Log density of Ga(alpha, beta)
 def gamma_logpdf(z, alpha, beta):
-    return -tf.lgamma(alpha) + alpha * tf.log(beta) \
-           + (alpha - 1.) * tf.log(z) - beta * z
+    return -tf.lgamma(alpha) + alpha * log(beta) \
+           + (alpha - 1.) * log(z) - beta * z
 
 
 log_q = gamma_logpdf
@@ -79,23 +42,25 @@ def h_inverse(z, alpha, beta):
 
 # Log density of proposal r(z) = s(epsilon) * |dh/depsilon|^{-1}
 def log_r(epsilon, alpha, beta):
-    return -tf.log(dh(epsilon, alpha, beta)) + log_s(epsilon)
+    return -log(dh(epsilon, alpha, beta)) + log_s(epsilon)
 
 
 # Density of the accepted value of epsilon
 # (this is just a change of variables too)
 def log_pi(epsilon, alpha, beta):
-    return log_s(epsilon) + \
-           log_q(h(epsilon, alpha, beta), alpha, beta) - \
+    return log_q(h(epsilon, alpha, beta), alpha, beta) - \
            log_r(epsilon, alpha, beta)
 
 
 def gamma_entropy(alpha, beta):
-    return alpha - tf.log(beta) + tf.lgamma(alpha) + (1. - alpha) * tf.digamma(alpha)
+    return alpha - log(beta) + tf.lgamma(alpha) + (1. - alpha) * tf.digamma(alpha)
+
 
 def sample_pi(alpha, beta, size=(1,)):
     gamma_samples = tf.random_gamma(size, alpha, beta)
-    return h_inverse(gamma_samples, alpha, beta)
+           # VERY IMPORTANT STOP GADIENT
+    return tf.stop_gradient(h_inverse(gamma_samples, alpha, beta))
+
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
@@ -105,15 +70,14 @@ if __name__ == "__main__":
     a0, b0 = 1.0, 1.0
     N = 10
     batch_size = 10
-    x = np.random.poisson(z_true, size=N).astype(np.float32)[np.newaxis, :]
-    # x = np.array([[ 5.], [ 3.], [ 6.], [ 2.], [ 5.], [ 4.], [ 2.], [ 1.], [ 5.], [ 2.]])
-    # plt.hist(x)
-    # plt.show()
+    #x = np.random.poisson(z_true, size=N).astype(np.float32)[np.newaxis, :]
+    x = np.array([5., 3., 6., 2., 5., 4., 2., 1., 5., 2.])
+    x = x[np.newaxis, :]
     x = tf.constant(x, dtype=tf.float32)
 
     def log_p(x, z):
         pz = gamma_logpdf(z, a0, b0)
-        pxgz = -tf.lgamma(x + 1.) - z + x * tf.log(z)
+        pxgz = -tf.lgamma(x + 1.) - z + x * log(z)
         return pz + tf.reduce_sum(pxgz, axis=1, keep_dims=True)
 
 
@@ -139,32 +103,40 @@ if __name__ == "__main__":
     # get per-sample objective
     ent = gamma_entropy(alpha, beta)[0]
     likelihood_i = log_p(x, z)
-    elbo_i = likelihood_i
-    elbo = tf.reduce_mean(elbo_i)
+    likelihood = tf.reduce_mean(likelihood_i)
     # get per-sample log-likelihoods
     lp = log_pi(epsilon, alpha, beta)
-    # print(gs(epsilon), gs(z), gs(ent), gs(lp), gs(likelihood))
-    # 1 / 0
+    elbo = likelihood + ent
+    score_obj = tf.reduce_mean(tf.stop_gradient(likelihood_i) * lp)
+    reparam_obj = elbo
     # total obj = reparm + no_grad(reparam) * logpi
-    f = elbo + tf.reduce_mean(tf.stop_gradient(elbo_i) * lp)
+    f = reparam_obj + score_obj
     loss = -f
-    #loss = tf.square(alpha - alpha_true) + tf.square(beta - beta_true)
-    opt = tf.train.MomentumOptimizer(.1, .9)
+    opt = tf.train.MomentumOptimizer(.01, .9, use_nesterov=True)
     opt_op = opt.minimize(loss, var_list=[_alpha_param, _beta_param])
+    g_a, g_b = tf.gradients(loss, [_alpha_param, _beta_param])
 
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         at, bt = sess.run([alpha_true, beta_true])
-        _fi, = sess.run([elbo])
-        for i in range(3000):
-            if i % 100 == 0:
-                l, alpha_star, beta_star, _elbo, _ = sess.run([loss, alpha, beta, elbo, opt_op])
-                print("true a = ", at)
-                print("infd a = ", alpha_star)
-                print("true b = ", bt)
-                print("infd b = ", beta_star)
-                print("elbo (loss) = {} ({})".format(_elbo, l))
-                print("E_q(z; theta)[z] = ", alpha_star / beta_star)
+
+        elbos = []
+        for i in range(300):
+            _elbo, _ = sess.run([elbo, opt_op])
+            elbos.append(_elbo)
+
+        alpha_star, beta_star = sess.run([alpha, beta])
+        print("true a = ", at)
+        print("infd a = ", alpha_star[0])
+        print("true b = ", bt)
+        print("infd b = ", beta_star[0])
+        print("elbo = {}".format(_elbo))
+        print("E_q(z; theta)[z] = ", alpha_star[0] / beta_star[0])
+
+        plt.plot(elbos)
+        plt.xlabel("Iteration")
+        plt.ylabel("ELBO")
+        plt.show()
 
         import scipy.stats
         zs = np.linspace(0, 6, 100)

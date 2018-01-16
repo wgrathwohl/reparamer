@@ -61,31 +61,11 @@ def sample_pi(theta, size=(1,)):
     alpha, beta = unwrap(theta)
     return h_inverse(npr.gamma(alpha, 1./beta, size=size), theta)
 
-# # Test
-# z = 2.0
-# th = npr.randn(2)
-# assert np.allclose(h_inverse(h(z, th), th), z)
-#
-# # Plot the acceptance probability in epsilon space
-# eps = np.linspace(-3,3,100)
-# th = npr.randn(2)
-# alpha, beta = unwrap(th)
-# eps_samples = sample_pi(th, 10000)
-#
-#
-# plt.plot(eps, np.exp(log_pi(eps, th)), 'r', label="$\pi(\epsilon, \\theta)$")
-# plt.hist(eps_samples, 40, normed=True, label="sampled")
-#
-# plt.xlim(-3, 3)
-# plt.xlabel("$\epsilon$")
-# plt.ylabel("$\pi(\epsilon, \\theta)$")
-# plt.legend(loc="upper right")
-# plt.show()
-npr.seed(0)
 z_true = 3.0
 a0, b0 = 1.0, 1.0
 N = 10
-x = npr.poisson(z_true, size=N)
+#x = npr.poisson(z_true, size=N)
+x = np.array([5., 3., 6., 2., 5., 4., 2., 1., 5., 2.])
 
 
 # Define the Poisson log likelihood
@@ -107,7 +87,6 @@ beta_true = b0 + N
 def gamma_entropy(theta):
     alpha, beta = unwrap(theta)
     return alpha - np.log(beta) + gammaln(alpha) + (1-alpha) * psi(alpha)
-
 
 def reparam_objective(epsilon, theta):
     return np.mean(log_p(x, h(epsilon, theta)), axis=0)
@@ -138,9 +117,9 @@ def g_elbo(theta, N_samples=10):
 
 elbo_values = []
 
-
 def callback(theta, t, g):
-    elbo_values.append(elbo(theta))
+    _elbo = elbo(theta)
+    elbo_values.append(_elbo)
 
 
 theta_0 = wrap(2.0, 2.0)
