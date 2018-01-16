@@ -47,9 +47,13 @@ def log_r(epsilon, alpha, beta):
 
 # Density of the accepted value of epsilon
 # (this is just a change of variables too)
-def log_pi(epsilon, alpha, beta):
-    return log_q(h(epsilon, alpha, beta), alpha, beta) - \
-           log_r(epsilon, alpha, beta)
+# This ignores the s(epsilon) term since it drops in the gradient
+def log_pi(epsilon, alpha, beta, z=None):
+    if z is None:
+        lq = log_q(h(epsilon, alpha, beta), alpha, beta)
+    else:
+        lq = log_q(z, alpha, beta)
+    return lq - log_r(epsilon, alpha, beta)
 
 
 def gamma_entropy(alpha, beta):
@@ -58,7 +62,6 @@ def gamma_entropy(alpha, beta):
 
 def sample_pi(alpha, beta, size=(1,)):
     gamma_samples = tf.random_gamma(size, alpha, beta)
-           # VERY IMPORTANT STOP GADIENT
     return tf.stop_gradient(h_inverse(gamma_samples, alpha, beta))
 
 
@@ -105,7 +108,7 @@ if __name__ == "__main__":
     likelihood_i = log_p(x, z)
     likelihood = tf.reduce_mean(likelihood_i)
     # get per-sample log-likelihoods
-    lp = log_pi(epsilon, alpha, beta)
+    lp = log_pi(epsilon, alpha, beta, z=z)
     elbo = likelihood + ent
     score_obj = tf.reduce_mean(tf.stop_gradient(likelihood_i) * lp)
     reparam_obj = elbo
@@ -121,7 +124,7 @@ if __name__ == "__main__":
         at, bt = sess.run([alpha_true, beta_true])
 
         elbos = []
-        for i in range(300):
+        for i in range(500):
             _elbo, _ = sess.run([elbo, opt_op])
             elbos.append(_elbo)
 
