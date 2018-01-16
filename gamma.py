@@ -104,7 +104,9 @@ if __name__ == "__main__":
     z_true = 3.0
     a0, b0 = 1.0, 1.0
     N = 10
-    x = np.random.poisson(z_true, size=N).astype(np.float32)[:, np.newaxis]
+    batch_size = 10
+    x = np.random.poisson(z_true, size=N).astype(np.float32)[np.newaxis, :]
+    # x = np.array([[ 5.], [ 3.], [ 6.], [ 2.], [ 5.], [ 4.], [ 2.], [ 1.], [ 5.], [ 2.]])
     # plt.hist(x)
     # plt.show()
     x = tf.constant(x, dtype=tf.float32)
@@ -112,7 +114,7 @@ if __name__ == "__main__":
     def log_p(x, z):
         pz = gamma_logpdf(z, a0, b0)
         pxgz = -tf.lgamma(x + 1.) - z + x * tf.log(z)
-        return tf.reduce_sum(pz) + tf.reduce_sum(pxgz)
+        return pz + tf.reduce_sum(pxgz, axis=1, keep_dims=True)
 
 
     # We can compute the true posterior in closed form
@@ -121,40 +123,42 @@ if __name__ == "__main__":
 
     _alpha_param = tf.get_variable(
         "alpha_param", [1],
-        dtype=tf.float32, initializer=tf.constant_initializer(2.)
+        dtype=tf.float32, initializer=tf.constant_initializer(0.0), trainable=True
     )
     _beta_param = tf.get_variable(
         "beta_param", [1],
-        dtype=tf.float32, initializer=tf.constant_initializer(2.)
+        dtype=tf.float32, initializer=tf.constant_initializer(np.log(2.)), trainable=True
     )
 
     alpha = tf.exp(_alpha_param) + 1.
     beta = tf.exp(_beta_param)
 
     # sample epsilon from gamma -> h^-1 -> epsilon
-    epsilon = sample_pi(alpha, beta, (1,))
+    epsilon = sample_pi(alpha, beta, (batch_size,))
     z = h(epsilon, alpha, beta)
     # get per-sample objective
-    ent = tf.reduce_sum(gamma_entropy(alpha, beta))
-    f = log_p(x, z) + ent
+    ent = gamma_entropy(alpha, beta)[0]
+    likelihood_i = log_p(x, z)
+    elbo_i = likelihood_i
+    elbo = tf.reduce_mean(elbo_i)
     # get per-sample log-likelihoods
     lp = log_pi(epsilon, alpha, beta)
-    print(gs(epsilon), gs(z), gs(f), gs(ent), gs(lp))
-    1 / 0
+    # print(gs(epsilon), gs(z), gs(ent), gs(lp), gs(likelihood))
+    # 1 / 0
     # total obj = reparm + no_grad(reparam) * logpi
-    f = elbo + tf.reduce_mean(tf.stop_gradient(f) * lp)
+    f = elbo + tf.reduce_mean(tf.stop_gradient(elbo_i) * lp)
     loss = -f
-
-    opt = tf.train.AdamOptimizer(.1)
-    opt_op = opt.minimize(loss)
+    #loss = tf.square(alpha - alpha_true) + tf.square(beta - beta_true)
+    opt = tf.train.MomentumOptimizer(.1, .9)
+    opt_op = opt.minimize(loss, var_list=[_alpha_param, _beta_param])
 
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         at, bt = sess.run([alpha_true, beta_true])
         _fi, = sess.run([elbo])
-        for i in range(1000):
-            l, alpha_star, beta_star, _elbo, _ = sess.run([loss, alpha, beta, elbo, opt_op])
+        for i in range(3000):
             if i % 100 == 0:
+                l, alpha_star, beta_star, _elbo, _ = sess.run([loss, alpha, beta, elbo, opt_op])
                 print("true a = ", at)
                 print("infd a = ", alpha_star)
                 print("true b = ", bt)
