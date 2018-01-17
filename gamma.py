@@ -28,7 +28,16 @@ def log_s(epsilon):
 def h(epsilon, alpha, beta):
     assert len(gs(epsilon)) == 2
     assert gs(alpha) == gs(beta)
-    return (alpha - 1. / 3.) * (1. + epsilon / tf.sqrt(9. * alpha - 3.))**3. / beta
+    z = (alpha - 1. / 3.) * (1. + epsilon / tf.sqrt(9. * alpha - 3.))**3. / beta
+    return z
+
+
+def shape_augmentation(z_tilde, B, alpha):
+    logz = log(z_tilde)
+    for i in range(1, B + 1):
+        u = tf.random_uniform(tf.shape(z_tilde))
+        logz = logz + log(u) / (alpha + i - 1.)
+    return tf.exp(logz)
 
 
 def dh(epsilon, alpha, beta):
@@ -84,31 +93,34 @@ if __name__ == "__main__":
         return pz + tf.reduce_sum(pxgz, axis=1, keep_dims=True)
 
 
+    B = 5  # for shape augmentation
+
     # We can compute the true posterior in closed form
     alpha_true = a0 + tf.reduce_sum(x)
     beta_true = tf.constant(b0 + N, dtype=tf.float32)
 
     _alpha_param = tf.get_variable(
         "alpha_param", [1],
-        dtype=tf.float32, initializer=tf.constant_initializer(0.0), trainable=True
+        dtype=tf.float32, initializer=tf.constant_initializer(np.log(2.)), trainable=True
     )
     _beta_param = tf.get_variable(
         "beta_param", [1],
         dtype=tf.float32, initializer=tf.constant_initializer(np.log(2.)), trainable=True
     )
 
-    alpha = tf.exp(_alpha_param) + 1.
+    alpha = tf.exp(_alpha_param)
     beta = tf.exp(_beta_param)
 
     # sample epsilon from gamma -> h^-1 -> epsilon
-    epsilon = sample_pi(alpha, beta, (batch_size,))
-    z = h(epsilon, alpha, beta)
+    epsilon = sample_pi(alpha + B, beta, (batch_size,))
+    z_tilde = h(epsilon, alpha + B, beta)
+    z = shape_augmentation(z_tilde, B, alpha)
     # get per-sample objective
     ent = gamma_entropy(alpha, beta)[0]
     likelihood_i = log_p(x, z)
     likelihood = tf.reduce_mean(likelihood_i)
     # get per-sample log-likelihoods
-    lp = log_pi(epsilon, alpha, beta, z=z)
+    lp = log_pi(epsilon, alpha + B, beta, z=z_tilde)
     elbo = likelihood + ent
     score_obj = tf.reduce_mean(tf.stop_gradient(likelihood_i) * lp)
     reparam_obj = elbo
@@ -117,14 +129,13 @@ if __name__ == "__main__":
     loss = -f
     opt = tf.train.MomentumOptimizer(.01, .9, use_nesterov=True)
     opt_op = opt.minimize(loss, var_list=[_alpha_param, _beta_param])
-    g_a, g_b = tf.gradients(loss, [_alpha_param, _beta_param])
 
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         at, bt = sess.run([alpha_true, beta_true])
 
         elbos = []
-        for i in range(500):
+        for i in range(300):
             _elbo, _ = sess.run([elbo, opt_op])
             elbos.append(_elbo)
 
