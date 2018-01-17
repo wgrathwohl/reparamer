@@ -82,8 +82,8 @@ if __name__ == "__main__":
     a0, b0 = 1.0, 1.0
     N = 10
     batch_size = 10
-    #x = np.random.poisson(z_true, size=N).astype(np.float32)[np.newaxis, :]
-    x = np.array([5., 3., 6., 2., 5., 4., 2., 1., 5., 2.])
+    x = np.random.poisson(z_true, size=N).astype(np.float32)
+    #x = np.array([5., 3., 6., 2., 5., 4., 2., 1., 5., 2.])
     x = x[np.newaxis, :]
     x = tf.constant(x, dtype=tf.float32)
 
