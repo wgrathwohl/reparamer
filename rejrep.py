@@ -1,5 +1,6 @@
 import tensorflow as tf
 import numpy as np
+import scipy.stats
 
 
 def gs(x):
@@ -12,6 +13,10 @@ def log(x, eps=1e-8):
 
 def lbeta(x, y):
     return tf.lgamma(x) + tf.lgamma(y) - tf.lgamma(x + y)
+
+
+def ldirichlet(a):
+    return tf.lgamma(tf.reduce_sum(a, axis=-1)) - tf.reduce_sum(tf.lgamma(a), axis=-1)
 
 
 """
@@ -31,6 +36,29 @@ def beta_logpdf(z, alpha, beta):
            - tf.lgamma(alpha) - tf.lgamma(beta)
 
 
+def dirichlet_logpdf(z, alpha):
+    return tf.expand_dims(
+        ldirichlet(alpha) + tf.reduce_sum((alpha - 1.) * log(z), axis=-1), -1
+    )
+
+
+def gamma_entropy(alpha, beta):
+    return alpha - log(beta) + tf.lgamma(alpha) + (1. - alpha) * tf.digamma(alpha)
+
+
+def beta_entropy(alpha, beta):
+    return lbeta(alpha, beta) \
+           - (alpha - 1.) * tf.digamma(alpha) - (beta - 1.) * tf.digamma(beta) \
+           + (alpha + beta - 2.) * tf.digamma(alpha + beta)
+
+
+def dirichlet_entropy(alpha):
+    alpha_hat = tf.reduce_sum(alpha, axis=-1, keep_dims=True)
+    dg_alpha_hat = tf.digamma(alpha_hat)
+    dg_alpha = tf.digamma(alpha)
+    return -tf.reduce_sum((alpha - 1.) * (dg_alpha - dg_alpha_hat)) - ldirichlet(alpha)
+
+
 def poisson_logpdf(x, z):
     return -tf.lgamma(x + 1.) - z + x * log(z)
 
@@ -39,9 +67,19 @@ def log_n_choose_k(n, k):
     return tf.lgamma(n + 1.) - tf.lgamma(k + 1.) - tf.lgamma(n - k + 1.)
 
 
+def log_multinomial_coef(n, m):
+    return tf.lgamma(n + 1.) - tf.reduce_sum(tf.lgamma(m + 1.), axis=1)
+
+
 def binomial_logpdf(n, x, z):
+    # x: [batch_size, dim, counts
     return log_n_choose_k(n, x) + x * log(z) + (n - x) * log(1. - z)
 
+def multinomial_logpdf(n, x, z):
+    coef = log_multinomial_coef(n, x)
+    func = tf.reduce_sum(tf.expand_dims(log(z), -1) * x, axis=1)
+    vals = coef + func
+    return vals
 
 
 # Log density of N(0, 1)
@@ -87,16 +125,6 @@ def log_pi(epsilon, alpha, beta, z=None):
     else:
         lq = gamma_logpdf(z, alpha, beta)
     return lq - log_r(epsilon, alpha, beta)
-
-
-def gamma_entropy(alpha, beta):
-    return alpha - log(beta) + tf.lgamma(alpha) + (1. - alpha) * tf.digamma(alpha)
-
-
-def beta_entropy(alpha, beta):
-    return lbeta(alpha, beta) \
-           - (alpha - 1.) * tf.digamma(alpha) - (beta - 1.) * tf.digamma(beta) \
-           + (alpha + beta - 2.) * tf.digamma(alpha + beta)
 
 
 def sample_pi(alpha, beta, size=(1,)):
@@ -280,9 +308,88 @@ def test_beta():
         plt.ylabel("$p(z \\mid x)$")
         plt.show()
 
+
+def test_dirichlet():
+    # follow experiment presented in paper and code
+    theta_true = np.array([1., 3., 2.])
+    theta_true = theta_true / theta_true.sum()
+    n_true = 7
+    a0 = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+    N = 10
+    D = theta_true.shape[0]
+    batch_size = 10
+    x = np.random.multinomial(n_true, theta_true, size=N).astype(np.float32)
+    x = x.T[np.newaxis, :]
+    # We can compute the true posterior in closed form
+    alpha_true = a0 + x[0].sum(axis=-1)
+
+    # bring data in to tensorflow
+    x = tf.constant(x, dtype=tf.float32)
+
+    def log_p(x, z):
+        pz = dirichlet_logpdf(z, a0[None, :])
+        pxgz = multinomial_logpdf(n_true, x, z)
+        return pz + tf.reduce_sum(pxgz, axis=1, keep_dims=True)
+
+    B = 5  # for shape augmentation
+
+    _alpha_param = tf.get_variable(
+        "alpha_param", [D],
+        dtype=tf.float32, initializer=tf.constant_initializer(np.log(2.)), trainable=True
+    )
+
+    alpha = tf.exp(_alpha_param)
+
+    # sample epsilon for each gamma
+    epsilon = sample_pi(alpha + B, 1., (batch_size,))
+    z_tilde = h(epsilon, alpha + B, 1.)
+    # gamma samples
+    z_gamma = shape_augmentation(z_tilde, B, alpha)
+    # get dirichlet samples
+    z = z_gamma / tf.reduce_sum(z_gamma, axis=1, keep_dims=True)
+
+    # get per-sample objective
+    ent = dirichlet_entropy(alpha)
+
+    likelihood_i = log_p(x, z)
+    likelihood = tf.reduce_mean(likelihood_i)
+    # get per-sample log-likelihoods
+    lp_i = log_pi(epsilon, alpha + B, 1., z=z_tilde)
+    # add up log-probs of all gamma samples
+    lp = tf.reduce_sum(lp_i, axis=1)
+    elbo = likelihood + ent
+    score_obj = tf.reduce_mean(tf.stop_gradient(likelihood_i) * lp)
+    reparam_obj = elbo
+    # total obj = reparm + no_grad(reparam) * logpi
+    f = reparam_obj + score_obj
+    loss = -f
+    opt = tf.train.MomentumOptimizer(.01, .9, use_nesterov=True)
+    opt_op = opt.minimize(loss, var_list=[_alpha_param])
+
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+
+        elbos = []
+        for i in range(300):
+            _elbo, _ = sess.run([elbo, opt_op])
+            elbos.append(_elbo)
+
+        alpha_star, = sess.run([alpha])
+        print("true a = ", alpha_true)
+        print("infd a = ", alpha_star)
+        print("elbo = {}".format(_elbo))
+
+        plt.plot(elbos)
+        plt.xlabel("Iteration")
+        plt.ylabel("ELBO")
+        plt.show()
+
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    test_beta()
+
+    test_dirichlet()
+    #test_beta()
     #test_gamma()
 
 
